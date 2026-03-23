@@ -7,3 +7,4 @@ venv/
 .venv/
 chroma_db/
 .DS_Store
+credentials.json
