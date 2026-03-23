@@ -92,7 +92,7 @@ def _embed_batch(texts: list[str], batch_size: int = 20) -> list[list[float]]:
             s = get_settings()
             genai.configure(api_key=s.gemini_api_key)
             result = genai.embed_content(
-                model     = "models/text-embedding-004",
+                model     = "models/gemini-embedding-001",
                 content   = batch,
                 task_type = "RETRIEVAL_DOCUMENT",
             )
@@ -166,7 +166,7 @@ def query_rules(query: str, document_id: str | None = None, n: int = 5) -> list[
     genai.configure(api_key=s.gemini_api_key)
 
     result = genai.embed_content(
-        model     = "models/text-embedding-004",
+        model     = "models/gemini-embedding-001",
         content   = query,
         task_type = "RETRIEVAL_QUERY",
     )
