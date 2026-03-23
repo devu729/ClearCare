@@ -34,7 +34,7 @@ def _embed(texts: list[str]) -> list[list[float]]:
     s = get_settings()
     genai.configure(api_key=s.gemini_api_key)
     result = genai.embed_content(
-        model   = "models/text-embedding-004",
+        model  =  "text-embedding-004",
         content = texts,
         task_type = "RETRIEVAL_DOCUMENT",
     )
