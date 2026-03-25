@@ -40,6 +40,14 @@ Respond ONLY with valid JSON — no markdown, no code fences, no preamble:
   "confidence_reasoning": "1-2 sentences explaining confidence level"
 }"""
 
+# Separate system instruction for appeal letter
+# Explicitly tells Gemini to return ONLY plain text, never JSON
+_SYSTEM_APPEAL = """You are a healthcare appeal letter writer.
+You write formal, professional insurance appeal letters.
+CRITICAL: Return ONLY the letter text as plain text.
+Do NOT return JSON. Do NOT use markdown. Do NOT add any explanation before or after the letter.
+Start the letter directly. End with the signature."""
+
 
 def _get_gemini():
     s = get_settings()
@@ -47,6 +55,16 @@ def _get_gemini():
     return genai.GenerativeModel(
         model_name="gemini-2.5-flash",
         system_instruction=_SYSTEM_TRACER,
+    )
+
+
+def _get_gemini_appeal():
+    """Separate Gemini instance with appeal-specific system instruction."""
+    s = get_settings()
+    genai.configure(api_key=s.gemini_api_key)
+    return genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=_SYSTEM_APPEAL,
     )
 
 
@@ -81,7 +99,7 @@ async def trace_denial(
         for c in chunks[:3]
     ])
 
-    # 4. Call Gemini
+    # 4. Call Gemini for dual explanation
     prompt = f"""DENIAL REASON / CODE:
 {clean_query}
 
@@ -124,7 +142,7 @@ Generate the dual explanation JSON. Return ONLY raw JSON, no markdown."""
         source_chunks = [c["text"] for c in chunks],
     )
 
-    # 7. Appeal letter
+    # 7. Appeal letter — uses separate Gemini instance with plain text instruction
     appeal_letter = None
     if generate_appeal:
         appeal_letter = await _generate_appeal_letter(
@@ -177,23 +195,88 @@ async def _generate_appeal_letter(
     clinician_explanation: str,
     patient_name: str | None,
 ) -> str:
-    name_line = f"Re: Appeal for {patient_name}" if patient_name else "Re: Insurance Appeal"
-    prompt = f"""Write a formal insurance appeal letter.
+    """
+    Generate a formal appeal letter as plain text.
+    Uses a separate Gemini instance with _SYSTEM_APPEAL instruction
+    to ensure plain text output, never JSON.
+    """
+    name_line = f"Patient: {patient_name}" if patient_name else ""
+
+    prompt = f"""Write a formal insurance appeal letter with these details:
 
 Denial reason: {denial_reason}
 Clinical context: {clinician_explanation[:500]}
-
-Requirements:
-- Addressed to insurance company Appeals Department
-- References the denial and requests reconsideration
-- Cites the relevant policy rule
-- Professional but firm language
-- Placeholders: [DATE], [CLAIM NUMBER], [PATIENT NAME], [MEMBER ID], [PROVIDER NAME]
-- Requests written response within 30 days
 {name_line}
 
-Write only the letter text. No preamble, no markdown."""
+The letter must:
+- Start with [DATE]
+- Be addressed to: Insurance Company Appeals Department
+- Reference the denial and request reconsideration
+- Cite the relevant policy rule
+- Use professional language
+- Include these placeholders exactly: [DATE], [CLAIM NUMBER], [PATIENT NAME], [MEMBER ID], [PROVIDER NAME], [Provider Address], [Provider Phone Number]
+- Request written response within 30 days
+- End with: Sincerely, [PROVIDER NAME]
 
-    model    = _get_gemini()
-    response = model.generate_content(prompt)
-    return response.text.strip()
+Write the letter now. Plain text only. Start with [DATE]."""
+
+    try:
+        model    = _get_gemini_appeal()
+        response = model.generate_content(prompt)
+        letter   = response.text.strip()
+
+        # Safety check: if Gemini still returned JSON, extract or reject it
+        if letter.startswith('{'):
+            try:
+                parsed = json.loads(letter)
+                # Try to find any letter-like field
+                for key in ["appeal_letter", "letter", "text", "content"]:
+                    if key in parsed and isinstance(parsed[key], str):
+                        return parsed[key]
+                # If no letter field found, generate a fallback
+                logger.warning("Appeal letter came back as JSON with no letter field, using fallback")
+                return _fallback_letter(denial_reason, patient_name)
+            except json.JSONDecodeError:
+                pass
+
+        return letter
+
+    except Exception as e:
+        logger.error(f"Appeal letter generation failed: {e}")
+        return _fallback_letter(denial_reason, patient_name)
+
+
+def _fallback_letter(denial_reason: str, patient_name: str | None) -> str:
+    """
+    Simple fallback appeal letter if Gemini fails.
+    Always returns clean plain text.
+    """
+    name = patient_name or "[PATIENT NAME]"
+    return f"""[DATE]
+
+Insurance Company Appeals Department
+[Insurance Company Address]
+
+RE: Formal Appeal for {name}
+Claim Number: [CLAIM NUMBER]
+Member ID: [MEMBER ID]
+
+To Whom It May Concern,
+
+I am writing to formally appeal the denial of the insurance claim for {name}.
+
+The claim was denied with the following reason: {denial_reason}
+
+We respectfully disagree with this determination and request a complete review of this decision. The service provided was medically necessary and appropriate for the patient's condition.
+
+We request that you reconsider this denial and provide coverage for the service in question. Please provide a written response within 30 days of receiving this letter.
+
+If you require any additional documentation or medical records to support this appeal, please do not hesitate to contact us.
+
+Thank you for your prompt attention to this matter.
+
+Sincerely,
+
+[PROVIDER NAME]
+[Provider Address]
+[Provider Phone Number]"""
