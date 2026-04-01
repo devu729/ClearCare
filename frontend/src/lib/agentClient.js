@@ -29,12 +29,15 @@ export async function uploadPolicyPDF(file, onProgress) {
   form.append('file', file)
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    xhr.timeout = 300000
+    xhr.ontimeout = () => reject(new Error('Upload timed out. Please try again.'))
     xhr.upload.addEventListener('progress', e => {
       if (e.lengthComputable && onProgress) onProgress(Math.round(e.loaded / e.total * 100))
     })
     xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText))
-      else {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({}) }
+      } else {
         try { reject(new Error(JSON.parse(xhr.responseText).detail)) }
         catch { reject(new Error(`Upload failed: ${xhr.status}`)) }
       }
@@ -56,11 +59,13 @@ export const traceDenial = (payload) =>
     body:    JSON.stringify(payload),
   })
 
-// ── MCP ───────────────────────────────────────────────────────────────────
+// ── MCP — Email + Calendar ─────────────────────────────────────────────────
 export const sendExplanationEmail = (payload) =>
   authFetch('/api/mcp/email', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
+    // payload includes: { to, subject, body, sender_email? }
+    // sender_email triggers Token Vault if configured
     body:    JSON.stringify(payload),
   })
 

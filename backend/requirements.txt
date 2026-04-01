@@ -10,3 +10,5 @@ pydantic>=2.6.3
 pydantic-settings>=2.2.1
 resend>=0.7.0
 httpx>=0.24.0
+tenacity>=8.2.0
+langfuse>=2.0.0

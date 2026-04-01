@@ -151,7 +151,7 @@ export default function ClinicianDashboard() {
             </div>
           ))}
           <div className="cd-sidebar-divider" />
-          <div className="cd-sidebar-section">MCP Connected</div>
+          <div className="cd-sidebar-section">Communication</div>
           {[{icon:'📧',label:'Gmail'},{icon:'📅',label:'Google Calendar'}].map(m => (
             <div key={m.label} className="cd-nav-item" style={{cursor:'default'}}>
               <span className="cd-nav-icon">{m.icon}</span>
