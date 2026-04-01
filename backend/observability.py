@@ -1,150 +1,124 @@
 """
-Observability Layer — Langfuse
-==============================
-Traces every AI agent call with:
-- Input query (PHI-stripped)
-- ChromaDB retrieval results
-- Gemini prompt + response
-- Token count + latency
-- Confidence score
-- Errors
+Observability — Langfuse v3 (correct API)
+==========================================
+Uses the @observe decorator from langfuse.decorators
+which is the correct API for langfuse>=2.0.0 / v3.
+
+DO NOT use Langfuse().trace() — that method does not exist in v3.
+The correct pattern is @observe() decorator + langfuse_context.
 
 Free at https://cloud.langfuse.com
-Add to .env:
+Add to Render env vars:
   LANGFUSE_PUBLIC_KEY=pk-lf-...
   LANGFUSE_SECRET_KEY=sk-lf-...
+  LANGFUSE_HOST=https://cloud.langfuse.com
 
-If keys not set → observability is silently disabled.
-App works exactly the same without it.
+App works fine without these — observability is silently disabled.
 """
 
 import logging
 import os
-from functools import wraps
 from config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_langfuse_client = None
 
-
-def get_langfuse():
-    """Get Langfuse client. Returns None if not configured — app still works."""
-    global _langfuse_client
-    if _langfuse_client is not None:
-        return _langfuse_client
-
+def _init_langfuse():
+    """
+    Initialize Langfuse once at startup.
+    Sets environment variables so the @observe decorator picks them up automatically.
+    Returns True if configured, False if not.
+    """
     s = get_settings()
-    if not s.observability_enabled:
-        return None
+
+    if not s.langfuse_public_key or not s.langfuse_secret_key:
+        return False
 
     try:
-        from langfuse import Langfuse
-        _langfuse_client = Langfuse(
-            public_key=s.langfuse_public_key,
-            secret_key=s.langfuse_secret_key,
-            host=s.langfuse_host,
-        )
-        logger.info("Langfuse observability initialized")
-        return _langfuse_client
+        # Set env vars — the @observe decorator reads these automatically
+        os.environ["LANGFUSE_PUBLIC_KEY"]  = s.langfuse_public_key
+        os.environ["LANGFUSE_SECRET_KEY"]  = s.langfuse_secret_key
+        os.environ["LANGFUSE_HOST"]        = s.langfuse_host
+
+        # Verify the import works
+        from langfuse import observe  # noqa
+        logger.info("Langfuse observability initialized ✓")
+        return True
+
+    except ImportError:
+        logger.warning("langfuse package not installed — observability disabled")
+        return False
     except Exception as e:
         logger.warning(f"Langfuse init failed (non-critical): {e}")
-        return None
+        return False
 
 
-def trace_agent_call(name: str):
+# Initialize on module load
+_ENABLED = _init_langfuse()
+
+
+def is_enabled() -> bool:
+    return _ENABLED
+
+
+def get_observe_decorator():
     """
-    Decorator that traces any async agent function in Langfuse.
+    Returns the @observe decorator if Langfuse is configured.
+    Returns a no-op decorator if not configured.
 
     Usage:
-        @trace_agent_call("denial_tracer")
-        async def trace_denial(query: str, ...) -> dict:
+        from observability import get_observe_decorator
+        observe = get_observe_decorator()
+
+        @observe()
+        async def my_function():
             ...
-
-    If Langfuse is not configured, the function runs normally.
     """
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            lf = get_langfuse()
-
-            if not lf:
-                # Langfuse not configured — just run the function
-                return await func(*args, **kwargs)
-
-            # Start a trace
-            trace = lf.trace(
-                name=name,
-                input={
-                    "args":   str(args)[:500],
-                    "kwargs": {k: str(v)[:200] for k, v in kwargs.items()},
-                },
-                tags=["clearcare", "production"],
-            )
-
-            try:
-                result = await func(*args, **kwargs)
-
-                # Log success metadata
-                trace.update(
-                    output={
-                        "status":     result.get("status", "unknown") if isinstance(result, dict) else "ok",
-                        "confidence": result.get("confidence") if isinstance(result, dict) else None,
-                        "verified":   result.get("verified") if isinstance(result, dict) else None,
-                    },
-                    level="DEFAULT",
-                )
-                return result
-
-            except Exception as e:
-                # Log failure
-                trace.update(
-                    output={"error": str(e)},
-                    level="ERROR",
-                )
-                raise
-
-        return wrapper
-    return decorator
-
-
-def log_gemini_call(trace, prompt: str, response_text: str, model: str = "gemini-2.5-flash"):
-    """Log a Gemini LLM call as a generation span inside a trace."""
-    lf = get_langfuse()
-    if not lf or not trace:
-        return
+    if not _ENABLED:
+        # Return a no-op decorator that does nothing
+        def noop_decorator(*args, **kwargs):
+            def wrapper(func):
+                return func
+            # Handle both @noop_decorator and @noop_decorator()
+            if len(args) == 1 and callable(args[0]):
+                return args[0]
+            return wrapper
+        return noop_decorator
 
     try:
-        trace.generation(
-            name=f"gemini_{model}",
-            model=model,
-            input=prompt[:1000],
-            output=response_text[:1000],
-            usage={
-                "input":  len(prompt.split()),
-                "output": len(response_text.split()),
-                "unit":   "TOKENS",
-            },
-        )
-    except Exception as e:
-        logger.debug(f"Langfuse generation log failed (non-critical): {e}")
+        from langfuse.decorators import observe
+        return observe
+    except Exception:
+        def noop_decorator(*args, **kwargs):
+            def wrapper(func):
+                return func
+            if len(args) == 1 and callable(args[0]):
+                return args[0]
+            return wrapper
+        return noop_decorator
 
 
-def log_retrieval(trace, query: str, chunks: list, collection: str = "policy_rules"):
-    """Log a ChromaDB retrieval as a span inside a trace."""
-    lf = get_langfuse()
-    if not lf or not trace:
+def update_current_observation(metadata: dict):
+    """
+    Add metadata to the current Langfuse observation.
+    Call this from inside an @observe decorated function.
+    Silently does nothing if Langfuse not configured.
+    """
+    if not _ENABLED:
         return
-
     try:
-        trace.span(
-            name="chromadb_retrieval",
-            input={"query": query[:200], "collection": collection},
-            output={
-                "chunks_retrieved": len(chunks),
-                "top_distance":     chunks[0]["distance"] if chunks else None,
-                "documents":        [c["document_name"] for c in chunks[:3]],
-            },
-        )
+        from langfuse.decorators import langfuse_context
+        langfuse_context.update_current_observation(metadata=metadata)
     except Exception as e:
-        logger.debug(f"Langfuse retrieval log failed (non-critical): {e}")
+        logger.debug(f"Langfuse update_current_observation failed (non-critical): {e}")
+
+
+def flush():
+    """Flush all pending Langfuse events. Call on app shutdown."""
+    if not _ENABLED:
+        return
+    try:
+        from langfuse import get_client
+        get_client().flush()
+    except Exception as e:
+        logger.debug(f"Langfuse flush failed (non-critical): {e}")

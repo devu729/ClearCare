@@ -1,10 +1,17 @@
 """
 Agent 2: Decision Tracer + Dual Explainer + Hallucination Guard
 
-Production additions:
-- Observability: Langfuse traces every call (token count, latency, errors)
-- Failure handling: tenacity retry with exponential backoff
-- Graceful degradation: fallback response if Gemini is down
+Production features added:
+1. Observability: @observe decorator from Langfuse v3
+   - Automatically traces inputs, outputs, latency, errors
+   - Silently disabled if LANGFUSE keys not set
+2. Failure handling: tenacity retry with exponential backoff
+   - Retries Gemini calls up to 3 times on any exception
+   - Falls back to structured response if all retries fail
+3. Recipient-aware appeal letters:
+   - "insurance": formal clinical appeal
+   - "patient": plain English from doctor to patient
+   - "patient_self": first-person appeal written for patient
 """
 
 import json
@@ -20,7 +27,12 @@ from tenacity import (
 from config import get_settings
 from security.phi_stripper import strip_phi
 from agents.policy_parser import query_rules
-from observability import trace_agent_call, log_gemini_call, log_retrieval, get_langfuse
+
+# Import the observe decorator — works with Langfuse v3
+# Returns a no-op decorator if Langfuse not configured
+from observability import get_observe_decorator, update_current_observation
+
+observe = get_observe_decorator()
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +83,9 @@ def _get_gemini_appeal():
     )
 
 
-# ── Failure Handling — Retry with exponential backoff ─────────────────────────
-# If Gemini returns a 429 (rate limit) or 503 (service unavailable),
-# retry up to 3 times with increasing delays: 2s → 4s → 8s
-# This handles transient failures gracefully without crashing the request.
+# ── Retry with exponential backoff ───────────────────────────────────────────
+# Handles transient Gemini failures (429 rate limit, 503 service unavailable)
+# Retries up to 3 times: waits 2s, then 4s, then 8s before giving up
 
 @retry(
     stop=stop_after_attempt(3),
@@ -83,18 +94,15 @@ def _get_gemini_appeal():
     reraise=True,
 )
 def _call_gemini_with_retry(model, prompt: str) -> str:
-    """
-    Call Gemini with automatic retry on failure.
-    Retries up to 3 times with exponential backoff (2s, 4s, 8s).
-    """
+    """Call Gemini with automatic retry on transient failures."""
     response = model.generate_content(prompt)
     return response.text.strip()
 
 
 def _fallback_explanation(denial_reason: str) -> dict:
     """
-    Fallback response when Gemini is completely unavailable.
-    Returns a structured response that degrades gracefully.
+    Returned when Gemini is completely unavailable after all retries.
+    Ensures the API always returns a usable response instead of crashing.
     """
     return {
         "clinician_explanation": (
@@ -104,9 +112,9 @@ def _fallback_explanation(denial_reason: str) -> dict:
             "and refer to the policy document directly."
         ),
         "patient_explanation": (
-            "Your claim was denied. We found matching policy rules but "
+            "Your claim was denied. We found the relevant policy rule but "
             "our AI explanation service is temporarily unavailable. "
-            "Please contact your provider's office for assistance."
+            "Please contact your provider's office for help."
         ),
         "clinician_actions": [
             "Review the matched policy rules in the Source Rules tab",
@@ -124,9 +132,14 @@ def _fallback_explanation(denial_reason: str) -> dict:
     }
 
 
-# ── Main Agent Function ────────────────────────────────────────────────────────
+# ── Main agent — decorated with @observe for Langfuse tracing ────────────────
+# The @observe decorator automatically captures:
+# - Function name, inputs, outputs
+# - Execution time (latency)
+# - Any exceptions
+# All silently — if Langfuse keys not set, function runs normally
 
-@trace_agent_call("denial_tracer")
+@observe()
 async def trace_denial(
     query: str,
     document_id: str | None = None,
@@ -138,24 +151,19 @@ async def trace_denial(
     Main denial tracing agent.
 
     Production features:
-    - Langfuse observability (traces every call)
-    - Retry with exponential backoff (handles Gemini outages)
-    - Graceful degradation (fallback when AI is down)
-    - PHI stripping (before any external API call)
+    - @observe() traces this entire function in Langfuse
+    - Retry with exponential backoff on Gemini failures
+    - Graceful fallback when AI unavailable
+    - PHI stripped before any external call
+    - Recipient-aware appeal letter generation
     """
-    lf = get_langfuse()
-    trace = lf.trace(name="trace_denial", input={"query": query[:200]}) if lf else None
 
     # 1. Strip PHI before any processing
     stripped    = strip_phi(query)
     clean_query = stripped.clean_text
 
-    # 2. Search ChromaDB
+    # 2. Search ChromaDB for matching policy rules
     chunks = query_rules(clean_query, document_id=document_id, n=5)
-
-    # Log retrieval to Langfuse
-    if trace:
-        log_retrieval(trace, clean_query, chunks)
 
     if not chunks:
         return {
@@ -169,7 +177,7 @@ async def trace_denial(
             "source_chunks":         [],
         }
 
-    # 3. Build context
+    # 3. Build anonymized context
     rule_context = "\n\n---\n\n".join([
         f"[Page {c['page_num']} — {c['document_name']}]\n{c['text']}"
         for c in chunks[:3]
@@ -187,26 +195,21 @@ Generate the dual explanation JSON. Return ONLY raw JSON, no markdown."""
     try:
         model    = _get_gemini()
         raw_text = _call_gemini_with_retry(model, prompt)
-
-        # Log to Langfuse
-        if trace:
-            log_gemini_call(trace, prompt, raw_text)
-
-        raw  = re.sub(r"^```json\s*", "", raw_text)
-        raw  = re.sub(r"^```\s*",     "", raw)
-        raw  = re.sub(r"\s*```$",     "", raw)
-        data = json.loads(raw)
+        raw      = re.sub(r"^```json\s*", "", raw_text)
+        raw      = re.sub(r"^```\s*",     "", raw)
+        raw      = re.sub(r"\s*```$",     "", raw)
+        data     = json.loads(raw)
 
     except json.JSONDecodeError:
-        logger.warning("Gemini returned non-JSON — using fallback explanation")
+        logger.warning("Gemini returned non-JSON — using fallback")
         data = _fallback_explanation(clean_query)
 
     except Exception as e:
-        # Gemini failed after all retries — degrade gracefully
-        logger.error(f"Gemini API error after retries: {e}")
+        # All retries exhausted — degrade gracefully
+        logger.error(f"Gemini failed after all retries: {e}")
         data = _fallback_explanation(clean_query)
 
-    # 5. Confidence score
+    # 5. Confidence score from cosine distance
     top_distance   = chunks[0]["distance"] if chunks else 1.0
     raw_confidence = max(0.0, min(1.0, 1.0 - (top_distance / 1.5)))
 
@@ -216,7 +219,18 @@ Generate the dual explanation JSON. Return ONLY raw JSON, no markdown."""
         source_chunks = [c["text"] for c in chunks],
     )
 
-    # 7. Appeal letter
+    # 7. Add metadata to Langfuse trace
+    # This enriches the trace in the Langfuse dashboard
+    update_current_observation({
+        "confidence_score":  round(raw_confidence, 2),
+        "chunks_retrieved":  len(chunks),
+        "verified":          verified,
+        "had_phi_in_query":  stripped.had_phi,
+        "document_id":       document_id,
+        "recipient_type":    recipient_type,
+    })
+
+    # 8. Generate appeal letter if requested
     appeal_letter = None
     if generate_appeal:
         appeal_letter = await _generate_appeal_letter(
@@ -245,6 +259,7 @@ Generate the dual explanation JSON. Return ONLY raw JSON, no markdown."""
 
 
 def _verify_against_source(explanation: str, source_chunks: list[str]) -> bool:
+    """Verify AI claims against the source policy text."""
     if not source_chunks:
         return False
     source = " ".join(source_chunks).lower()
@@ -265,6 +280,7 @@ def _verify_against_source(explanation: str, source_chunks: list[str]) -> bool:
     return (hits / len(claims)) >= 0.70
 
 
+@observe()
 async def _generate_appeal_letter(
     denial_reason: str,
     clinician_explanation: str,
@@ -272,12 +288,8 @@ async def _generate_appeal_letter(
     recipient_type: str = "insurance",
 ) -> str:
     """
-    Generate appeal letter with different prompts per recipient type.
-
-    recipient_type:
-    - "insurance"    → formal clinical appeal to insurance company
-    - "patient"      → plain English summary from doctor to patient
-    - "patient_self" → personal appeal written for the patient to send
+    Generate appeal letter with different tone per recipient.
+    Also decorated with @observe so each letter generation is traced.
     """
     if recipient_type == "patient":
         prompt = f"""Write a brief, empathetic email from a doctor to their patient.
@@ -285,12 +297,12 @@ async def _generate_appeal_letter(
 Denial reason: {denial_reason}
 Patient name: {patient_name or 'the patient'}
 
-The email should:
-- Be warm and reassuring
-- Explain in plain English what happened with their insurance claim
-- Tell them what the doctor's office is doing about it
-- Tell them what they need to do if anything
-- Be short — 3 to 4 paragraphs maximum
+Requirements:
+- Warm and reassuring tone
+- Plain English — no medical jargon
+- Explain what happened and what the doctor is doing about it
+- Tell the patient what they need to do (if anything)
+- 3 to 4 paragraphs maximum
 - Start with: Dear {patient_name or 'Patient'},
 
 Write only the email body. Plain text only."""
@@ -301,9 +313,9 @@ Write only the email body. Plain text only."""
 Denial reason: {denial_reason}
 Patient name: {patient_name or '[PATIENT NAME]'}
 
-The letter must:
-- Be written in first person (I, my, me)
-- Include a personal statement about why this service was needed
+Requirements:
+- First person voice (I, my, me)
+- Personal statement about why this service was needed
 - Reference the denial and request reconsideration
 - State the right to appeal
 - Request written response within 30 days
@@ -314,14 +326,14 @@ Write only the letter. Plain text. Start with [DATE]."""
 
     else:
         # Default: formal provider appeal to insurance company
-        prompt = f"""Write a formal insurance appeal letter from a healthcare provider to an insurance company.
+        prompt = f"""Write a formal insurance appeal letter from a healthcare provider.
 
 Denial reason: {denial_reason}
 Clinical context: {clinician_explanation[:500]}
 Patient name: {patient_name or '[PATIENT NAME]'}
 
-The letter must:
-- Be formal and clinical in tone
+Requirements:
+- Formal clinical tone
 - Cite the specific policy rule
 - Argue medical necessity
 - Include placeholders: [DATE], [CLAIM NUMBER], [PATIENT NAME], [MEMBER ID], [PROVIDER NAME], [Provider Address], [Provider Phone Number]
@@ -331,10 +343,10 @@ The letter must:
 Write only the letter. Plain text. Start with [DATE]."""
 
     try:
-        model    = _get_gemini_appeal()
-        letter   = _call_gemini_with_retry(model, prompt)
+        model  = _get_gemini_appeal()
+        letter = _call_gemini_with_retry(model, prompt)
 
-        # Safety check — if Gemini still returned JSON somehow
+        # Safety: if Gemini returned JSON despite instructions, handle it
         if letter.strip().startswith('{'):
             try:
                 parsed = json.loads(letter)
@@ -353,19 +365,19 @@ Write only the letter. Plain text. Start with [DATE]."""
 
 
 def _fallback_letter(denial_reason: str, patient_name: str | None, recipient_type: str) -> str:
-    """Clean fallback letter when AI is unavailable."""
+    """Clean fallback letter returned when AI generation fails."""
     name = patient_name or "[PATIENT NAME]"
 
     if recipient_type == "patient":
         return f"""Dear {name},
 
-I am writing to inform you about the status of your recent insurance claim.
+I am writing regarding the recent denial of your insurance claim.
 
 Your claim was denied with the following reason: {denial_reason}
 
-Our office is currently reviewing this denial and will take appropriate steps to address it on your behalf. We will keep you informed of any updates.
+Our office is reviewing this denial and will take appropriate steps on your behalf. We will keep you updated on any developments.
 
-If you have any questions, please do not hesitate to contact our office.
+Please don't hesitate to contact our office if you have any questions.
 
 Sincerely,
 [PROVIDER NAME]"""
@@ -381,13 +393,13 @@ Member ID: [MEMBER ID]
 
 To Whom It May Concern,
 
-This letter serves as a formal appeal regarding the denial of the insurance claim for {name}.
+This letter is a formal appeal regarding the denial of the insurance claim for {name}.
 
 Denial reason: {denial_reason}
 
-We respectfully request a complete review of this decision. The service provided was medically necessary and appropriate. We are prepared to provide all supporting clinical documentation.
+We respectfully request a complete review of this determination. The service provided was medically necessary. We are prepared to provide all supporting clinical documentation upon request.
 
-Please respond in writing within 30 days.
+Please provide a written response within 30 days of receiving this letter.
 
 Sincerely,
 [PROVIDER NAME]
