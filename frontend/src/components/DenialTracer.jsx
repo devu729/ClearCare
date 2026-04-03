@@ -8,7 +8,9 @@ export default function DenialTracer({ userRole = 'clinician' }) {
   const [loading, setLoading] = useState(false)
   const [result,  setResult]  = useState(null)
   const [error,   setError]   = useState('')
-  const [view,    setView]    = useState(userRole === 'clinician' ? 'clinician' : 'patient')
+  const [view,    setView]    = useState('clinician')
+
+  const isPatient = userRole === 'patient'
 
   useEffect(() => {
     listDocuments().then(d => {
@@ -28,6 +30,13 @@ export default function DenialTracer({ userRole = 'clinician' }) {
 
   const confColor = s => s >= 0.85 ? '#10b981' : s >= 0.65 ? '#f59e0b' : '#ef4444'
   const confLabel = s => s >= 0.85 ? 'High confidence' : s >= 0.65 ? 'Medium — review recommended' : 'Low — manual verification required'
+
+  // Clinician sees all 3 tabs. Patient sees nothing — just the plain explanation directly.
+  const tabs = [
+    { id: 'clinician', label: '👨‍⚕️ Clinician View' },
+    { id: 'patient',   label: '🧑 Patient View'    },
+    { id: 'sources',   label: '📄 Source Rules'    },
+  ]
 
   return (
     <div style={{ maxWidth:760 }}>
@@ -55,15 +64,24 @@ export default function DenialTracer({ userRole = 'clinician' }) {
         .dt-chunk { background:#f8fafc; border:1px solid #e0f2fe; border-radius:8px; padding:12px 14px; margin-bottom:8px; }
         .dt-chunk-tag { font-size:10px; font-family:'DM Mono',monospace; background:#e0f2fe; color:#0369a1; padding:2px 7px; border-radius:4px; margin-right:6px; }
         .dt-warn { margin:0 24px 16px; padding:12px 14px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; font-size:12px; color:#92400e; display:flex; gap:8px; }
+        .dt-patient-badge { display:inline-flex; align-items:center; gap:6px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; padding:8px 14px; font-size:12px; color:#166534; font-weight:500; margin-bottom:16px; }
         @keyframes fadeUp { from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)} }
         @keyframes spin { to{transform:rotate(360deg)} }
       `}</style>
 
-      <h2 style={{ fontSize:20,fontWeight:700,color:'#0f172a',marginBottom:4 }}>Denial Tracer</h2>
-      <p style={{ fontSize:13,color:'#64748b',marginBottom:28 }}>Enter a denial code or paste a denial letter — find the exact policy rule that triggered it</p>
+      <h2 style={{ fontSize:20,fontWeight:700,color:'#0f172a',marginBottom:4 }}>
+        {isPatient ? 'Explain My Denial' : 'Denial Tracer'}
+      </h2>
+      <p style={{ fontSize:13,color:'#64748b',marginBottom:28 }}>
+        {isPatient
+          ? 'Paste your denial code or letter — get a plain English explanation of what it means and what to do next'
+          : 'Enter a denial code or paste a denial letter — find the exact policy rule that triggered it'
+        }
+      </p>
 
       <div className="dt-form">
-        {docs.length > 0 && (
+        {/* Clinician only: document selector */}
+        {!isPatient && docs.length > 0 && (
           <div style={{ marginBottom:14 }}>
             <label style={{ fontSize:13,fontWeight:500,color:'#334155',display:'block',marginBottom:6 }}>Policy document to search</label>
             <select className="dt-select" value={docId} onChange={e => setDocId(e.target.value)}>
@@ -72,27 +90,51 @@ export default function DenialTracer({ userRole = 'clinician' }) {
             </select>
           </div>
         )}
-        <label style={{ fontSize:13,fontWeight:500,color:'#334155',display:'block',marginBottom:6 }}>Denial code, reason, or paste denial letter</label>
+
+        <label style={{ fontSize:13,fontWeight:500,color:'#334155',display:'block',marginBottom:6 }}>
+          {isPatient
+            ? 'Your denial code or letter text'
+            : 'Denial code, reason, or paste denial letter'
+          }
+        </label>
         <textarea className="dt-input" rows={3}
-          placeholder='e.g. "CO-4 — The service is inconsistent with the payer policy" or paste full denial letter...'
+          placeholder={isPatient
+            ? 'e.g. "CO-4" or paste your full denial letter from the insurance company...'
+            : 'e.g. "CO-4 — The service is inconsistent with the payer policy" or paste full denial letter...'
+          }
           value={input} onChange={e => setInput(e.target.value)} />
-        <div style={{ fontSize:11,color:'#94a3b8',margin:'6px 0 0' }}>Works with CARC/RARC codes, payer denial codes, or plain-text denial letters</div>
+        <div style={{ fontSize:11,color:'#94a3b8',margin:'6px 0 0' }}>
+          {isPatient
+            ? 'Find the code on your Explanation of Benefits (EOB) letter from your insurance company'
+            : 'Works with CARC/RARC codes, payer denial codes, or plain-text denial letters'
+          }
+        </div>
         <button className="dt-btn" onClick={trace} disabled={loading || !input.trim()}>
-          {loading ? 'Tracing...' : 'Trace Denial →'}
+          {loading ? 'Tracing...' : isPatient ? 'Explain My Denial →' : 'Trace Denial →'}
         </button>
       </div>
 
       {loading && (
         <div style={{ display:'flex',alignItems:'center',gap:10,padding:16,background:'#f0f9ff',borderRadius:10,fontSize:13,color:'#0369a1',marginBottom:16 }}>
-          <div className="dt-spinner" /> Searching indexed rules → matching policy → generating explanations...
+          <div className="dt-spinner" />
+          {isPatient
+            ? 'Finding the policy rule → generating your explanation...'
+            : 'Searching indexed rules → matching policy → generating explanations...'
+          }
         </div>
       )}
-      {error && <div style={{ padding:'12px 16px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,fontSize:13,color:'#dc2626',marginBottom:16 }}>⚠ {error}</div>}
+      {error && (
+        <div style={{ padding:'12px 16px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,fontSize:13,color:'#dc2626',marginBottom:16 }}>
+          ⚠ {error}
+        </div>
+      )}
 
       {result && (
         <div className="dt-result">
           <div className="dt-header">
-            <div style={{ fontSize:16,fontWeight:700,color:'#0f172a',marginBottom:10 }}>Decision traced to policy rule</div>
+            <div style={{ fontSize:16,fontWeight:700,color:'#0f172a',marginBottom:10 }}>
+              {isPatient ? 'Here is what happened' : 'Decision traced to policy rule'}
+            </div>
             <div style={{ display:'flex',alignItems:'center',gap:12 }}>
               <div className="dt-conf-track">
                 <div className="dt-conf-fill" style={{ width:`${Math.round((result.confidence||0)*100)}%`, background:confColor(result.confidence||0) }} />
@@ -110,51 +152,92 @@ export default function DenialTracer({ userRole = 'clinician' }) {
           </div>
 
           {!result.verified && (
-            <div className="dt-warn">⚠ <span>Some points could not be verified against the source document. Please manually review before acting.</span></div>
+            <div className="dt-warn">
+              ⚠ <span>Some points could not be verified against the source document. Please manually review before acting.</span>
+            </div>
           )}
 
-          <div className="dt-tabs">
-            {[{id:'clinician',label:'👨‍⚕️ Clinician View'},{id:'patient',label:'🧑 Patient View'},{id:'sources',label:'📄 Source Rules'}].map(v => (
-              <button key={v.id} className={`dt-tab ${view===v.id?'active':''}`} onClick={() => setView(v.id)}>{v.label}</button>
-            ))}
-          </div>
-
-          {view === 'clinician' && (
+          {/* PATIENT: no tabs, show explanation directly */}
+          {isPatient && (
             <>
-              <div className="dt-explain" dangerouslySetInnerHTML={{ __html:(result.clinician_explanation||'').replace(/\n/g,'<br/>') }} />
-              {result.clinician_actions?.length > 0 && (
-                <div style={{ padding:'0 24px 24px' }}>
-                  <div style={{ fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.1em',color:'#94a3b8',marginBottom:12 }}>Recommended Actions</div>
-                  {result.clinician_actions.map((a,i) => <div className="dt-action" key={i}><span>→</span>{a}</div>)}
-                </div>
-              )}
-            </>
-          )}
-          {view === 'patient' && (
-            <>
-              <div className="dt-explain" dangerouslySetInnerHTML={{ __html:(result.patient_explanation||'').replace(/\n/g,'<br/>') }} />
+              <div className="dt-explain"
+                dangerouslySetInnerHTML={{ __html:(result.patient_explanation||'').replace(/\n/g,'<br/>') }} />
               {result.patient_actions?.length > 0 && (
                 <div style={{ padding:'0 24px 24px' }}>
-                  <div style={{ fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.1em',color:'#94a3b8',marginBottom:12 }}>Your Next Steps</div>
-                  {result.patient_actions.map((a,i) => <div className="dt-action" key={i}><span>{i+1}.</span>{a}</div>)}
+                  <div style={{ fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.1em',color:'#94a3b8',marginBottom:12 }}>
+                    Your Next Steps
+                  </div>
+                  {result.patient_actions.map((a,i) => (
+                    <div className="dt-action" key={i}><span>{i+1}.</span>{a}</div>
+                  ))}
                 </div>
               )}
             </>
           )}
-          {view === 'sources' && (
-            <div style={{ padding:'24px' }}>
-              <div style={{ fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.1em',color:'#94a3b8',marginBottom:10 }}>Matched Policy Rules</div>
-              {(result.source_chunks||[]).map((c,i) => (
-                <div className="dt-chunk" key={i}>
-                  <div style={{ marginBottom:6 }}>
-                    <span className="dt-chunk-tag">Page {c.page_num}</span>
-                    <span className="dt-chunk-tag">{c.document_name}</span>
-                    <span className="dt-chunk-tag">Match: {Math.round((1-c.distance)*100)}%</span>
+
+          {/* CLINICIAN: show all 3 tabs */}
+          {!isPatient && (
+            <>
+              <div className="dt-tabs">
+                {tabs.map(v => (
+                  <button key={v.id} className={`dt-tab ${view===v.id?'active':''}`} onClick={() => setView(v.id)}>
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+
+              {view === 'clinician' && (
+                <>
+                  <div className="dt-explain"
+                    dangerouslySetInnerHTML={{ __html:(result.clinician_explanation||'').replace(/\n/g,'<br/>') }} />
+                  {result.clinician_actions?.length > 0 && (
+                    <div style={{ padding:'0 24px 24px' }}>
+                      <div style={{ fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.1em',color:'#94a3b8',marginBottom:12 }}>
+                        Recommended Actions
+                      </div>
+                      {result.clinician_actions.map((a,i) => (
+                        <div className="dt-action" key={i}><span>→</span>{a}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {view === 'patient' && (
+                <>
+                  <div className="dt-explain"
+                    dangerouslySetInnerHTML={{ __html:(result.patient_explanation||'').replace(/\n/g,'<br/>') }} />
+                  {result.patient_actions?.length > 0 && (
+                    <div style={{ padding:'0 24px 24px' }}>
+                      <div style={{ fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.1em',color:'#94a3b8',marginBottom:12 }}>
+                        Patient Next Steps
+                      </div>
+                      {result.patient_actions.map((a,i) => (
+                        <div className="dt-action" key={i}><span>{i+1}.</span>{a}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {view === 'sources' && (
+                <div style={{ padding:'24px' }}>
+                  <div style={{ fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.1em',color:'#94a3b8',marginBottom:10 }}>
+                    Matched Policy Rules
                   </div>
-                  <div style={{ fontSize:12,color:'#475569',lineHeight:1.7,fontFamily:'DM Mono,monospace' }}>{c.text}</div>
+                  {(result.source_chunks||[]).map((c,i) => (
+                    <div className="dt-chunk" key={i}>
+                      <div style={{ marginBottom:6 }}>
+                        <span className="dt-chunk-tag">Page {c.page_num}</span>
+                        <span className="dt-chunk-tag">{c.document_name}</span>
+                        <span className="dt-chunk-tag">Match: {Math.round((1-c.distance)*100)}%</span>
+                      </div>
+                      <div style={{ fontSize:12,color:'#475569',lineHeight:1.7,fontFamily:'DM Mono,monospace' }}>{c.text}</div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </div>
       )}
