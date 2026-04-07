@@ -41,7 +41,8 @@ export default function AppealDrafter() {
       const raw = data.appeal_letter || ''
       setLetter(raw)
       setEditedLetter(raw)
-      if (data.appeal_deadline) setDeadlineDate(data.appeal_deadline)
+      // Always set a deadline — use API response or fall back to 180 days
+      setDeadlineDate(data.appeal_deadline || '180 days from denial notice')
       if (patientName) setFields(f => ({ ...f, patient_name: patientName }))
     } catch (e) {
       setError(e.message)
@@ -268,6 +269,7 @@ export default function AppealDrafter() {
               </div>
             )}
 
+            {/* Email row */}
             <div className="ad-send-row">
               <input className="ad-send-input" type="email"
                 placeholder="Insurance company appeals email..."
@@ -277,26 +279,27 @@ export default function AppealDrafter() {
               </button>
             </div>
 
-            {deadlineDate && (
-              <div>
-                <div className="ad-send-row">
-                  <div className="ad-deadline-badge">⏰ Appeal deadline: {deadlineDate}</div>
-                  <button className={`ad-btn-ghost ${calSaved ? 'ad-btn-success' : ''}`} onClick={saveDeadline}>
-                    {calSaved ? '✓ Downloaded!' : '📅 Download Calendar File'}
-                  </button>
+            {/* Calendar row — always shows after letter is generated */}
+            <div>
+              <div className="ad-send-row">
+                <div className="ad-deadline-badge">
+                  ⏰ Appeal deadline: {deadlineDate}
                 </div>
-                {!calSaved && (
-                  <div className="ad-ics-hint">
-                    📎 Downloads a <strong>.ics</strong> file — open to add deadline to Google Calendar, Outlook, or Apple Calendar.
-                  </div>
-                )}
-                {calSaved && (
-                  <div className="ad-ics-hint success">
-                    ✅ Open the downloaded file to add the appeal deadline to your calendar. Reminders set 7 days and 1 day before.
-                  </div>
-                )}
+                <button className={`ad-btn-ghost ${calSaved ? 'ad-btn-success' : ''}`} onClick={saveDeadline}>
+                  {calSaved ? '✓ Downloaded!' : '📅 Download Calendar File'}
+                </button>
               </div>
-            )}
+              {!calSaved && (
+                <div className="ad-ics-hint">
+                  📎 Downloads a <strong>.ics</strong> file — open to add this deadline to Google Calendar, Outlook, or Apple Calendar. Reminders set 7 days and 1 day before.
+                </div>
+              )}
+              {calSaved && (
+                <div className="ad-ics-hint success">
+                  ✅ Open the downloaded file to add the appeal deadline to your calendar. Reminders set 7 days and 1 day before.
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
