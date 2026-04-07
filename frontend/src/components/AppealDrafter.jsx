@@ -41,8 +41,8 @@ export default function AppealDrafter() {
       const raw = data.appeal_letter || ''
       setLetter(raw)
       setEditedLetter(raw)
-      // Always set a deadline — use API response or fall back to 180 days
-      setDeadlineDate(data.appeal_deadline || '180 days from denial notice')
+      // Always set a deadline — use API response or fall back to 30 days
+      setDeadlineDate(data.appeal_deadline || '30 days from denial notice')
       if (patientName) setFields(f => ({ ...f, patient_name: patientName }))
     } catch (e) {
       setError(e.message)
